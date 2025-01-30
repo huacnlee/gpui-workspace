@@ -1,10 +1,10 @@
 use std::any::TypeId;
 
 use gpui::{
-    AnyElement, AnyView, AppContext, Element as _, Entity as _, EntityId, EventEmitter,
-    FocusHandle, FocusableView, Pixels, Point, SharedString, View, ViewContext, WeakView,
-    WindowContext,
+    AnyElement, AnyView, App, Context, Element as _, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Pixels, Point, Render, SharedString, WeakEntity,
 };
+use ui::prelude::Window;
 
 use super::{
     pane::{self, Pane},
@@ -24,41 +24,42 @@ pub struct TabContentParams {
     pub selected: bool,
 }
 
-pub trait Item: FocusableView + EventEmitter<Self::Event> {
+pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     type Event;
 
     /// Returns the content of the tab for this item.
-    fn tab_content(&self, _params: TabContentParams, _cx: &WindowContext) -> AnyElement {
+    fn tab_content(&self, _params: TabContentParams, _window: &Window, _cx: &App) -> AnyElement {
         gpui::Empty.into_any()
     }
 
     /// Returns the tooltip for the tab.
-    fn tab_tooltip(&self, _: &AppContext) -> Option<SharedString> {
+    fn tab_tooltip(&self, _: &App) -> Option<SharedString> {
         None
     }
 
     /// Returns the description for the tab.
-    fn tab_description(&self, _: usize, _: &AppContext) -> Option<SharedString> {
+    fn tab_description(&self, _: usize, _: &App) -> Option<SharedString> {
         None
     }
 
     fn to_item_events(_event: &Self::Event, _f: impl FnMut(ItemEvent)) {}
 
     /// Invoked when the item is deactivated.
-    fn deactivated(&mut self, _: &mut ViewContext<Self>) {}
+    fn deactivated(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// Invoked when the workspace is deactivated.
-    fn workspace_deactivated(&mut self, _cx: &mut ViewContext<Self>) {}
+    fn workspace_deactivated(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
-    fn is_singleton(&self, _cx: &AppContext) -> bool {
+    fn is_singleton(&self, _cx: &App) -> bool {
         false
     }
 
     fn clone_on_split(
         &self,
         _workspace_id: Option<WorkspaceId>,
-        _: &mut ViewContext<Self>,
-    ) -> Option<View<Self>>
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Entity<Self>>
     where
         Self: Sized,
     {
@@ -68,8 +69,8 @@ pub trait Item: FocusableView + EventEmitter<Self::Event> {
     fn act_as_type<'a>(
         &'a self,
         type_id: TypeId,
-        self_handle: &'a View<Self>,
-        _: &'a AppContext,
+        self_handle: &'a Entity<Self>,
+        _: &'a App,
     ) -> Option<AnyView> {
         if TypeId::of::<Self>() == type_id {
             Some(self_handle.clone().into())
@@ -78,47 +79,63 @@ pub trait Item: FocusableView + EventEmitter<Self::Event> {
         }
     }
 
-    fn added_to_workspace(&mut self, _workspace: &mut Workspace, _cx: &mut ViewContext<Self>) {}
-    fn pixel_position_of_cursor(&self, _: &AppContext) -> Option<Point<Pixels>> {
+    fn added_to_workspace(
+        &mut self,
+        _workspace: &mut Workspace,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+    fn pixel_position_of_cursor(&self, _: &App) -> Option<Point<Pixels>> {
         None
     }
 }
 
 pub trait ItemHandle: 'static + Send {
     fn item_id(&self) -> EntityId;
+    #[allow(clippy::type_complexity)]
     fn subscribe_to_item_events(
         &self,
-        cx: &mut WindowContext,
-        handler: Box<dyn Fn(ItemEvent, &mut WindowContext)>,
+        window: &mut Window,
+        cx: &mut App,
+
+        handler: Box<dyn Fn(ItemEvent, &mut Window, &mut App)>,
     ) -> gpui::Subscription;
-    fn focus_handle(&self, cx: &WindowContext) -> FocusHandle;
-    fn tab_tooltip(&self, cx: &AppContext) -> Option<SharedString>;
-    fn tab_description(&self, detail: usize, cx: &AppContext) -> Option<SharedString>;
-    fn tab_content(&self, params: TabContentParams, cx: &WindowContext) -> AnyElement;
-    fn dragged_tab_content(&self, params: TabContentParams, cx: &WindowContext) -> AnyElement;
+    fn item_focus_handle(&self, window: &Window, cx: &App) -> FocusHandle;
+    fn tab_tooltip(&self, cx: &App) -> Option<SharedString>;
+    fn tab_description(&self, detail: usize, cx: &App) -> Option<SharedString>;
+    fn tab_content(&self, params: TabContentParams, window: &Window, cx: &App) -> AnyElement;
+    fn dragged_tab_content(
+        &self,
+        params: TabContentParams,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement;
     fn clone_on_split(
         &self,
         workspace_id: Option<WorkspaceId>,
-        cx: &mut WindowContext,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<Box<dyn ItemHandle>>;
     fn added_to_pane(
         &self,
         workspace: &mut Workspace,
-        pane: View<Pane>,
-        cx: &mut ViewContext<Workspace>,
+        pane: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
     );
-    fn deactivated(&self, cx: &mut WindowContext);
-    fn workspace_deactivated(&self, cx: &mut WindowContext);
+    fn deactivated(&self, window: &mut Window, cx: &mut App);
+    fn workspace_deactivated(&self, window: &mut Window, cx: &mut App);
     fn to_any(&self) -> AnyView;
     fn on_release(
         &self,
-        cx: &mut AppContext,
-        callback: Box<dyn FnOnce(&mut AppContext) + Send>,
+        cx: &mut App,
+        callback: Box<dyn FnOnce(&mut App) + Send>,
     ) -> gpui::Subscription;
-    fn pixel_position_of_cursor(&self, cx: &AppContext) -> Option<Point<Pixels>>;
+    fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>>;
     fn downgrade_item(&self) -> Box<dyn WeakItemHandle>;
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
-    fn act_as_type<'a>(&'a self, type_id: TypeId, cx: &'a AppContext) -> Option<AnyView>;
+    fn act_as_type<'a>(&'a self, type_id: TypeId, cx: &'a App) -> Option<AnyView>;
 }
 
 pub trait WeakItemHandle: Send + Sync {
@@ -127,49 +144,56 @@ pub trait WeakItemHandle: Send + Sync {
 }
 
 impl dyn ItemHandle {
-    pub fn downcast<V: 'static>(&self) -> Option<View<V>> {
+    pub fn downcast<V: 'static>(&self) -> Option<Entity<V>> {
         self.to_any().downcast().ok()
     }
 
-    pub fn act_as<V: 'static>(&self, cx: &AppContext) -> Option<View<V>> {
+    pub fn act_as<V: 'static>(&self, cx: &App) -> Option<Entity<V>> {
         self.act_as_type(TypeId::of::<V>(), cx)
             .and_then(|t| t.downcast().ok())
     }
 }
 
-impl<T: Item> ItemHandle for View<T> {
+impl<T: Item> ItemHandle for Entity<T> {
     fn subscribe_to_item_events(
         &self,
-        cx: &mut WindowContext,
-        handler: Box<dyn Fn(ItemEvent, &mut WindowContext)>,
+        window: &mut Window,
+        cx: &mut App,
+        handler: Box<dyn Fn(ItemEvent, &mut Window, &mut App)>,
     ) -> gpui::Subscription {
-        cx.subscribe(self, move |_, event, cx| {
-            T::to_item_events(event, |item_event| handler(item_event, cx));
+        window.subscribe(self, cx, move |_, event, window, cx| {
+            T::to_item_events(event, |item_event| handler(item_event, window, cx));
         })
     }
 
-    fn focus_handle(&self, cx: &WindowContext) -> FocusHandle {
-        self.focus_handle(cx)
+    fn item_focus_handle(&self, _window: &Window, cx: &App) -> FocusHandle {
+        self.read(cx).focus_handle(cx)
     }
 
-    fn tab_tooltip(&self, cx: &AppContext) -> Option<SharedString> {
+    fn tab_tooltip(&self, cx: &App) -> Option<SharedString> {
         self.read(cx).tab_tooltip(cx)
     }
 
-    fn tab_description(&self, detail: usize, cx: &AppContext) -> Option<SharedString> {
+    fn tab_description(&self, detail: usize, cx: &App) -> Option<SharedString> {
         self.read(cx).tab_description(detail, cx)
     }
 
-    fn tab_content(&self, params: TabContentParams, cx: &WindowContext) -> AnyElement {
-        self.read(cx).tab_content(params, cx)
+    fn tab_content(&self, params: TabContentParams, window: &Window, cx: &App) -> AnyElement {
+        self.read(cx).tab_content(params, window, cx)
     }
 
-    fn dragged_tab_content(&self, params: TabContentParams, cx: &WindowContext) -> AnyElement {
+    fn dragged_tab_content(
+        &self,
+        params: TabContentParams,
+        window: &Window,
+        cx: &App,
+    ) -> AnyElement {
         self.read(cx).tab_content(
             TabContentParams {
                 selected: true,
                 ..params
             },
+            window,
             cx,
         )
     }
@@ -178,24 +202,26 @@ impl<T: Item> ItemHandle for View<T> {
         Box::new(self.clone())
     }
 
-    fn act_as_type<'a>(&'a self, type_id: TypeId, cx: &'a AppContext) -> Option<AnyView> {
+    fn act_as_type<'a>(&'a self, type_id: TypeId, cx: &'a App) -> Option<AnyView> {
         self.read(cx).act_as_type(type_id, self, cx)
     }
 
     fn clone_on_split(
         &self,
         workspace_id: Option<WorkspaceId>,
-        cx: &mut WindowContext,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<Box<dyn ItemHandle>> {
-        self.update(cx, |item, cx| item.clone_on_split(workspace_id, cx))
+        self.update(cx, |item, cx| item.clone_on_split(workspace_id, window, cx))
             .map(|handle| Box::new(handle) as Box<dyn ItemHandle>)
     }
 
     fn added_to_pane(
         &self,
         workspace: &mut Workspace,
-        pane: View<Pane>,
-        cx: &mut ViewContext<Workspace>,
+        pane: &Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
     ) {
         let _weak_item = self.downgrade();
 
@@ -204,9 +230,10 @@ impl<T: Item> ItemHandle for View<T> {
             .insert(self.item_id(), pane.downgrade())
             .is_none()
         {
-            let mut event_subscription = Some(cx.subscribe(
+            let mut event_subscription = Some(cx.subscribe_in(
                 self,
-                move |workspace, item: View<T>, event, cx| {
+                window,
+                move |workspace, item: &Entity<T>, event, window, cx| {
                     let pane = if let Some(pane) = workspace
                         .panes_by_item
                         .get(&item.item_id())
@@ -219,9 +246,10 @@ impl<T: Item> ItemHandle for View<T> {
 
                     T::to_item_events(event, |event| match event {
                         ItemEvent::CloseItem => {
-                            pane.update(cx, |pane, cx| pane.close_item_by_id(item.item_id(), cx))
-                                .detach_and_log_err(cx);
-                            return;
+                            pane.update(cx, |pane, cx| {
+                                pane.close_item_by_id(item.item_id(), window, cx)
+                            })
+                            .detach_and_log_err(cx);
                         }
 
                         ItemEvent::UpdateTab => {
@@ -249,12 +277,12 @@ impl<T: Item> ItemHandle for View<T> {
         // });
     }
 
-    fn deactivated(&self, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.deactivated(cx));
+    fn deactivated(&self, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.deactivated(window, cx));
     }
 
-    fn workspace_deactivated(&self, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.workspace_deactivated(cx));
+    fn workspace_deactivated(&self, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.workspace_deactivated(window, cx));
     }
 
     fn item_id(&self) -> EntityId {
@@ -267,13 +295,13 @@ impl<T: Item> ItemHandle for View<T> {
 
     fn on_release(
         &self,
-        cx: &mut AppContext,
-        callback: Box<dyn FnOnce(&mut AppContext) + Send>,
+        cx: &mut App,
+        callback: Box<dyn FnOnce(&mut App) + Send>,
     ) -> gpui::Subscription {
         cx.observe_release(self, move |_, cx| callback(cx))
     }
 
-    fn pixel_position_of_cursor(&self, cx: &AppContext) -> Option<Point<Pixels>> {
+    fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>> {
         self.read(cx).pixel_position_of_cursor(cx)
     }
 
@@ -300,7 +328,7 @@ impl Clone for Box<dyn ItemHandle> {
     }
 }
 
-impl<T: Item> WeakItemHandle for WeakView<T> {
+impl<T: Item> WeakItemHandle for WeakEntity<T> {
     fn id(&self) -> EntityId {
         self.entity_id()
     }
