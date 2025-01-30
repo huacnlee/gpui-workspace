@@ -331,6 +331,7 @@ impl Dock {
         cx.notify()
     }
 
+    #[allow(clippy::comparison_chain)]
     pub fn remove_panel<T: Panel>(
         &mut self,
         panel: &Entity<T>,
@@ -342,7 +343,6 @@ impl Dock {
             .iter()
             .position(|entry| entry.panel.id() == Entity::entity_id(panel))
         {
-            #[allow(clippy::comparison_chain)]
             if panel_ix == self.active_panel_index {
                 self.active_panel_index = 0;
                 self.set_open(false, window, cx);
