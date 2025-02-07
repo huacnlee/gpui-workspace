@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use gpui::{
-    deferred, div, prelude::FluentBuilder as _, px, AnyView, AppContext, Axis, Entity, EntityId,
-    EventEmitter, FocusHandle, FocusableView, InteractiveElement as _, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, StatefulInteractiveElement, StyleRefinement,
-    Styled as _, Subscription, View, ViewContext, VisualContext, WeakView, WindowContext,
+    deferred, div, prelude::FluentBuilder as _, px, AnyView, App, AppContext as _, Axis, Context,
+    Entity, EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, MouseButton,
+    MouseDownEvent, MouseUpEvent, ParentElement as _, Pixels, Render, StatefulInteractiveElement,
+    StyleRefinement, Styled as _, Subscription, WeakEntity,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ui::{theme::ActiveTheme, IconName, StyledExt as _};
+use ui::{prelude::Window, theme::ActiveTheme, IconName, StyledExt as _};
 
 const RESIZE_HANDLE_SIZE: Pixels = Pixels(6.);
 
@@ -41,30 +41,36 @@ pub enum PanelEvent {
 }
 
 #[allow(unused)]
-pub trait Panel: FocusableView + EventEmitter<PanelEvent> {
+pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn persistent_name() -> &'static str;
     /// Return the position of the panel.
-    fn position(&self, cx: &WindowContext) -> DockPosition;
+    fn position(&self, window: &Window, cx: &App) -> DockPosition;
     /// Return true if the panel can be positioned at the given position.
     fn can_position(&self, position: DockPosition) -> bool {
         true
     }
     /// Set the position of the panel.
-    fn set_position(&mut self, position: DockPosition, cx: &mut ViewContext<Self>) {}
+    fn set_position(
+        &mut self,
+        position: DockPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+    }
     /// Return the size of the panel.
-    fn size(&self, cx: &WindowContext) -> Pixels;
+    fn size(&self, window: &Window, cx: &App) -> Pixels;
     /// Set the size of the panel.
-    fn set_size(&mut self, size: Option<Pixels>, cx: &mut ViewContext<Self>) {}
+    fn set_size(&mut self, size: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {}
     /// Set the active state of the panel.
-    fn set_active(&mut self, active: bool, cx: &mut ViewContext<Self>) {}
-    fn icon(&self, _cx: &WindowContext) -> Option<IconName> {
+    fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {}
+    fn icon(&self, _window: &Window, cx: &App) -> Option<IconName> {
         None
     }
-    fn is_zoomed(&self, _cx: &WindowContext) -> bool {
+    fn is_zoomed(&self, _window: &Window, cx: &App) -> bool {
         false
     }
-    fn set_zoomed(&mut self, _zoomed: bool, _cx: &mut ViewContext<Self>) {}
-    fn starts_open(&self, _cx: &WindowContext) -> bool {
+    fn set_zoomed(&mut self, _zoomed: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
+    fn starts_open(&self, _window: &Window, cx: &App) -> bool {
         true
     }
 }
@@ -72,20 +78,20 @@ pub trait Panel: FocusableView + EventEmitter<PanelEvent> {
 pub trait PanelHandle: Send + Sync {
     fn id(&self) -> EntityId;
     fn persistent_name(&self) -> &'static str;
-    fn position(&self, cx: &WindowContext) -> DockPosition;
-    fn can_position(&self, position: DockPosition, cx: &WindowContext) -> bool;
-    fn set_position(&self, position: DockPosition, cx: &mut WindowContext);
-    fn size(&self, cx: &WindowContext) -> Pixels;
-    fn set_size(&self, size: Option<Pixels>, cx: &mut WindowContext);
-    fn icon(&self, cx: &WindowContext) -> Option<IconName>;
-    fn focus_handle(&self, cx: &AppContext) -> FocusHandle;
-    fn set_active(&self, active: bool, cx: &mut WindowContext);
-    fn is_zoomed(&self, cx: &WindowContext) -> bool;
-    fn set_zoomed(&self, zoomed: bool, cx: &mut WindowContext);
+    fn position(&self, window: &Window, cx: &App) -> DockPosition;
+    fn can_position(&self, position: DockPosition, window: &Window, cx: &App) -> bool;
+    fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
+    fn size(&self, window: &Window, cx: &App) -> Pixels;
+    fn set_size(&self, size: Option<Pixels>, window: &mut Window, cx: &mut App);
+    fn icon(&self, window: &Window, cx: &App) -> Option<IconName>;
+    fn panel_focus_handle(&self, cx: &App) -> FocusHandle;
+    fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
+    fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
+    fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn to_any(&self) -> AnyView;
 }
 
-impl<T> PanelHandle for View<T>
+impl<T> PanelHandle for Entity<T>
 where
     T: Panel,
 {
@@ -97,44 +103,44 @@ where
         T::persistent_name()
     }
 
-    fn position(&self, cx: &WindowContext) -> DockPosition {
-        self.read(cx).position(cx)
+    fn position(&self, window: &Window, cx: &App) -> DockPosition {
+        self.read(cx).position(window, cx)
     }
 
-    fn can_position(&self, position: DockPosition, cx: &WindowContext) -> bool {
+    fn can_position(&self, position: DockPosition, _window: &Window, cx: &App) -> bool {
         self.read(cx).can_position(position)
     }
 
-    fn set_position(&self, position: DockPosition, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.set_position(position, cx));
+    fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.set_position(position, window, cx));
     }
 
-    fn size(&self, cx: &WindowContext) -> Pixels {
-        self.read(cx).size(cx)
+    fn size(&self, window: &Window, cx: &App) -> Pixels {
+        self.read(cx).size(window, cx)
     }
 
-    fn set_size(&self, size: Option<Pixels>, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.set_size(size, cx));
+    fn set_size(&self, size: Option<Pixels>, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.set_size(size, window, cx));
     }
 
-    fn icon(&self, cx: &WindowContext) -> Option<IconName> {
-        self.read(cx).icon(cx)
+    fn icon(&self, window: &Window, cx: &App) -> Option<IconName> {
+        self.read(cx).icon(window, cx)
     }
 
-    fn focus_handle(&self, cx: &AppContext) -> FocusHandle {
+    fn panel_focus_handle(&self, cx: &App) -> FocusHandle {
         self.read(cx).focus_handle(cx).clone()
     }
 
-    fn set_active(&self, active: bool, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.set_active(active, cx));
+    fn set_active(&self, active: bool, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.set_active(active, window, cx));
     }
 
-    fn is_zoomed(&self, cx: &WindowContext) -> bool {
-        self.read(cx).is_zoomed(cx)
+    fn is_zoomed(&self, window: &Window, cx: &App) -> bool {
+        self.read(cx).is_zoomed(window, cx)
     }
 
-    fn set_zoomed(&self, zoomed: bool, cx: &mut WindowContext) {
-        self.update(cx, |this, cx| this.set_zoomed(zoomed, cx));
+    fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App) {
+        self.update(cx, |this, cx| this.set_zoomed(zoomed, window, cx));
     }
 
     fn to_any(&self) -> AnyView {
@@ -162,21 +168,25 @@ pub struct Dock {
     _subscriptions: [Subscription; 1],
 }
 
-impl FocusableView for Dock {
-    fn focus_handle(&self, _cx: &AppContext) -> FocusHandle {
+impl Focusable for Dock {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
 impl Dock {
-    pub fn new(position: DockPosition, cx: &mut ViewContext<Workspace>) -> View<Self> {
+    pub fn new(
+        position: DockPosition,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
         let focus_handle = cx.focus_handle();
         // let workspace = cx.view().clone();
 
-        let dock = cx.new_view(|cx: &mut ViewContext<Self>| {
-            let focus_subscription = cx.on_focus(&focus_handle, |dock, cx| {
+        let dock = cx.new(|cx: &mut Context<Self>| {
+            let focus_subscription = cx.on_focus(&focus_handle, window, |dock, window, cx| {
                 if let Some(active_entry) = dock.panel_entries.get(dock.active_panel_index) {
-                    active_entry.panel.focus_handle(cx).focus(cx)
+                    active_entry.panel.panel_focus_handle(cx).focus(window)
                 }
             });
 
@@ -191,9 +201,9 @@ impl Dock {
             }
         });
 
-        cx.on_focus_in(&focus_handle, {
+        cx.on_focus_in(&focus_handle, window, {
             let dock = dock.downgrade();
-            move |_workspace, cx| {
+            move |_workspace, _, cx| {
                 let Some(dock) = dock.upgrade() else {
                     return;
                 };
@@ -215,83 +225,95 @@ impl Dock {
         self.is_open
     }
 
-    pub fn set_panel_zoomed(&mut self, panel: &AnyView, zoomed: bool, cx: &mut ViewContext<Self>) {
+    pub fn set_panel_zoomed(
+        &mut self,
+        panel: &AnyView,
+        zoomed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for entry in &mut self.panel_entries {
             if entry.panel.id() == panel.entity_id() {
-                if zoomed != entry.panel.is_zoomed(cx) {
-                    entry.panel.set_zoomed(zoomed, cx);
+                if zoomed != entry.panel.is_zoomed(window, cx) {
+                    entry.panel.set_zoomed(zoomed, window, cx);
                 }
-            } else if entry.panel.is_zoomed(cx) {
-                entry.panel.set_zoomed(false, cx);
+            } else if entry.panel.is_zoomed(window, cx) {
+                entry.panel.set_zoomed(false, window, cx);
             }
         }
 
         cx.notify();
     }
 
-    pub fn zoom_out(&mut self, cx: &mut ViewContext<Self>) {
+    pub fn zoom_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for entry in &mut self.panel_entries {
-            if entry.panel.is_zoomed(cx) {
-                entry.panel.set_zoomed(false, cx);
+            if entry.panel.is_zoomed(window, cx) {
+                entry.panel.set_zoomed(false, window, cx);
             }
         }
     }
 
     pub(crate) fn add_panel<T: Panel>(
         &mut self,
-        panel: View<T>,
-        workspace: WeakView<Workspace>,
-        cx: &mut ViewContext<Self>,
+        panel: Entity<T>,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         let subscriptions = [
             cx.observe(&panel, |_, _, cx| cx.notify()),
-            cx.subscribe(&panel, move |this, panel, event, cx| match event {
-                PanelEvent::ZoomIn => {
-                    this.set_panel_zoomed(&panel.to_any(), true, cx);
-                    if !panel.focus_handle(cx).contains_focused(cx) {
-                        cx.focus_view(&panel);
-                    }
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.zoomed = Some(panel.downgrade().into());
-                            workspace.zoomed_position = Some(panel.read(cx).position(cx));
-                            cx.emit(Event::ZoomChanged);
-                        })
-                        .ok();
-                }
-                PanelEvent::ZoomOut => {
-                    this.set_panel_zoomed(&panel.to_any(), false, cx);
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            if workspace.zoomed_position == Some(this.position) {
-                                workspace.zoomed = None;
-                                workspace.zoomed_position = None;
+            cx.subscribe_in(
+                &panel,
+                window,
+                move |this, panel, event, window, cx| match event {
+                    PanelEvent::ZoomIn => {
+                        this.set_panel_zoomed(&panel.to_any(), true, window, cx);
+                        if !panel.focus_handle(cx).contains_focused(window, cx) {
+                            cx.focus_view(panel, window);
+                        }
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                workspace.zoomed = Some(panel.downgrade().into());
+                                workspace.zoomed_position =
+                                    Some(panel.read(cx).position(window, cx));
                                 cx.emit(Event::ZoomChanged);
-                            }
-                            cx.notify();
-                        })
-                        .ok();
-                }
-                PanelEvent::Activate => {
-                    if let Some(ix) = this
-                        .panel_entries
-                        .iter()
-                        .position(|entry| entry.panel.id() == Entity::entity_id(&panel))
-                    {
-                        this.set_open(true, cx);
-                        this.activate_panel(ix, cx);
-                        cx.focus_view(&panel);
+                            })
+                            .ok();
                     }
-                }
-                PanelEvent::Close => {
-                    if this
-                        .visible_panel()
-                        .map_or(false, |p| p.id() == Entity::entity_id(&panel))
-                    {
-                        this.set_open(false, cx);
+                    PanelEvent::ZoomOut => {
+                        this.set_panel_zoomed(&panel.to_any(), false, window, cx);
+                        workspace
+                            .update(cx, |workspace, cx| {
+                                if workspace.zoomed_position == Some(this.position) {
+                                    workspace.zoomed = None;
+                                    workspace.zoomed_position = None;
+                                    cx.emit(Event::ZoomChanged);
+                                }
+                                cx.notify();
+                            })
+                            .ok();
                     }
-                }
-            }),
+                    PanelEvent::Activate => {
+                        if let Some(ix) = this
+                            .panel_entries
+                            .iter()
+                            .position(|entry| entry.panel.id() == Entity::entity_id(panel))
+                        {
+                            this.set_open(true, window, cx);
+                            this.activate_panel(ix, window, cx);
+                            cx.focus_view(panel, window);
+                        }
+                    }
+                    PanelEvent::Close => {
+                        if this
+                            .visible_panel()
+                            .map_or(false, |p| p.id() == Entity::entity_id(panel))
+                        {
+                            this.set_open(false, window, cx);
+                        }
+                    }
+                },
+            ),
         ];
 
         let _name = panel.persistent_name().to_string();
@@ -301,15 +323,21 @@ impl Dock {
             _subscriptions: subscriptions,
         });
 
-        if panel.read(cx).starts_open(cx) {
-            self.activate_panel(self.panel_entries.len() - 1, cx);
-            self.set_open(true, cx);
+        if panel.read(cx).starts_open(window, cx) {
+            self.activate_panel(self.panel_entries.len() - 1, window, cx);
+            self.set_open(true, window, cx);
         }
 
         cx.notify()
     }
 
-    pub fn remove_panel<T: Panel>(&mut self, panel: &View<T>, cx: &mut ViewContext<Self>) {
+    #[allow(clippy::comparison_chain)]
+    pub fn remove_panel<T: Panel>(
+        &mut self,
+        panel: &Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(panel_ix) = self
             .panel_entries
             .iter()
@@ -317,7 +345,7 @@ impl Dock {
         {
             if panel_ix == self.active_panel_index {
                 self.active_panel_index = 0;
-                self.set_open(false, cx);
+                self.set_open(false, window, cx);
             } else if panel_ix < self.active_panel_index {
                 self.active_panel_index -= 1;
             }
@@ -330,15 +358,15 @@ impl Dock {
         self.panel_entries.len()
     }
 
-    pub fn activate_panel(&mut self, panel_ix: usize, cx: &mut ViewContext<Self>) {
+    pub fn activate_panel(&mut self, panel_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if panel_ix != self.active_panel_index {
             if let Some(active_panel) = self.panel_entries.get(self.active_panel_index) {
-                active_panel.panel.set_active(false, cx);
+                active_panel.panel.set_active(false, window, cx);
             }
 
             self.active_panel_index = panel_ix;
             if let Some(active_panel) = self.panel_entries.get(self.active_panel_index) {
-                active_panel.panel.set_active(true, cx);
+                active_panel.panel.set_active(true, window, cx);
             }
 
             cx.notify();
@@ -366,59 +394,64 @@ impl Dock {
         }
     }
 
-    pub(crate) fn set_open(&mut self, open: bool, cx: &mut ViewContext<Self>) {
+    pub(crate) fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if open != self.is_open {
             self.is_open = open;
             if let Some(active_panel) = self.panel_entries.get(self.active_panel_index) {
-                active_panel.panel.set_active(open, cx);
+                active_panel.panel.set_active(open, window, cx);
             }
 
             cx.notify();
         }
     }
 
-    pub fn panel<T: Panel>(&self) -> Option<View<T>> {
+    pub fn panel<T: Panel>(&self) -> Option<Entity<T>> {
         self.panel_entries
             .iter()
             .find_map(|entry| entry.panel.to_any().clone().downcast().ok())
     }
 
-    pub fn resize_active_panel(&mut self, size: Option<Pixels>, cx: &mut ViewContext<Self>) {
+    pub fn resize_active_panel(
+        &mut self,
+        size: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(entry) = self.panel_entries.get_mut(self.active_panel_index) {
             let size = size.map(|size| size.max(RESIZE_HANDLE_SIZE).round());
-            entry.panel.set_size(size, cx);
+            entry.panel.set_size(size, window, cx);
             cx.notify();
         }
     }
 }
 
 impl Render for Dock {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         if self.visible_entry().is_none() {
             return div().key_context("Dock").track_focus(&self.focus_handle);
         }
 
         let entry = self.visible_entry().unwrap();
-        let size = entry.panel.size(cx);
+        let size = entry.panel.size(window, cx);
         let position = self.position;
         let create_resize_handle = || {
             let handle = div()
                 .id("resize-handle")
-                .on_drag(DraggedDock(position), |dock, cx| {
+                .on_drag(DraggedDock(position), |dock, _, _, cx| {
                     cx.stop_propagation();
-                    cx.new_view(|_| dock.clone())
+                    cx.new(|_| dock.clone())
                 })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|_, _: &MouseDownEvent, cx| {
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
                     }),
                 )
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(|v, e: &MouseUpEvent, cx| {
+                    cx.listener(|v, e: &MouseUpEvent, window, cx| {
                         if e.click_count == 2 {
-                            v.resize_active_panel(None, cx);
+                            v.resize_active_panel(None, window, cx);
                             cx.stop_propagation();
                         }
                     }),

@@ -10,21 +10,22 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    actions, div, impl_actions, prelude::FluentBuilder as _, px, AppContext, DefiniteLength,
-    DragMoveEvent, Element as _, EntityId, EventEmitter, FocusHandle, FocusOutEvent, FocusableView,
-    InteractiveElement as _, IntoElement, KeyContext, ParentElement, Pixels, Point, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Task, View, ViewContext,
-    VisualContext as _, WeakFocusHandle, WeakView, WindowContext,
+    actions, div, impl_internal_actions, prelude::FluentBuilder as _, px, App, AppContext, Context,
+    DefiniteLength, DragMoveEvent, Element as _, Entity, EntityId, EventEmitter, FocusHandle,
+    FocusOutEvent, Focusable, InteractiveElement as _, IntoElement, KeyContext, ParentElement,
+    Pixels, Point, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Task,
+    WeakEntity, WeakFocusHandle,
 };
 use serde::Deserialize;
 
 use crate::util::ResultExt;
 use ui::{
     label::Label,
+    prelude::Window,
     tab::{Tab, TabBar},
-    theme::{ActiveTheme, Colorize as _},
+    theme::ActiveTheme,
     tooltip::Tooltip,
-    v_flex, Icon, IconName, Selectable, StyledExt,
+    v_flex, Colorize as _, Icon, IconName, Selectable, StyledExt,
 };
 
 use super::{
@@ -36,7 +37,7 @@ use super::{
 #[derive(Clone, Deserialize, PartialEq, Debug)]
 pub struct ActivateItem(pub usize);
 
-impl_actions!(pane, [ActivateItem]);
+impl_internal_actions!(pane, [ActivateItem]);
 
 actions!(
     pane,
@@ -101,7 +102,7 @@ impl fmt::Debug for Event {
 
 #[derive(Clone)]
 pub struct DraggedTab {
-    pub pane: View<Pane>,
+    pub pane: Entity<Pane>,
     pub item: Box<dyn ItemHandle>,
     pub ix: usize,
     pub detail: usize,
@@ -109,21 +110,23 @@ pub struct DraggedTab {
 }
 
 impl Render for DraggedTab {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let label = self.item.tab_content(
             TabContentParams {
                 detail: Some(self.detail),
                 selected: false,
             },
+            window,
             cx,
         );
         Tab::new("", label).selected(self.is_active).into_element()
     }
 }
 
+#[allow(clippy::type_complexity)]
 /// A pane
 pub struct Pane {
-    pub(crate) workspace: WeakView<Workspace>,
+    pub(crate) workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     items: Vec<Box<dyn ItemHandle>>,
     zoomed: bool,
@@ -131,11 +134,12 @@ pub struct Pane {
     last_focus_handle_by_item: HashMap<EntityId, WeakFocusHandle>,
     active_item_index: usize,
     drag_split_direction: Option<SplitDirection>,
-    can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut WindowContext) -> bool>>,
-    custom_drop_handle:
-        Option<Arc<dyn Fn(&mut Pane, &dyn Any, &mut ViewContext<Pane>) -> ControlFlow<(), ()>>>,
+    can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool>>,
+    custom_drop_handle: Option<
+        Arc<dyn Fn(&mut Pane, &dyn Any, &mut Window, &mut Context<Pane>) -> ControlFlow<(), ()>>,
+    >,
     can_split: bool,
-    should_display_tab_bar: Rc<dyn Fn(&ViewContext<Pane>) -> bool>,
+    should_display_tab_bar: Rc<dyn Fn(&Window, &Context<Pane>) -> bool>,
     tab_bar_scroll_handle: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -143,20 +147,22 @@ pub struct Pane {
 impl EventEmitter<Event> for Pane {}
 
 impl Pane {
+    #[allow(clippy::type_complexity)]
     pub fn new(
-        workspace: WeakView<Workspace>,
-        can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut WindowContext) -> bool + 'static>>,
-        cx: &mut ViewContext<Self>,
+        workspace: WeakEntity<Workspace>,
+        can_drop_predicate: Option<Arc<dyn Fn(&dyn Any, &mut Window, &mut App) -> bool + 'static>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
         let subscriptions = vec![
-            cx.on_focus(&focus_handle, Pane::focus_in),
-            cx.on_focus_in(&focus_handle, Pane::focus_in),
-            cx.on_focus_out(&focus_handle, Pane::focus_out),
+            cx.on_focus(&focus_handle, window, Pane::focus_in),
+            cx.on_focus_in(&focus_handle, window, Pane::focus_in),
+            cx.on_focus_out(&focus_handle, window, Pane::focus_out),
         ];
 
-        let _handle = cx.view().downgrade();
+        let _handle = cx.entity().downgrade();
         Self {
             workspace,
             focus_handle,
@@ -169,27 +175,32 @@ impl Pane {
             can_drop_predicate,
             custom_drop_handle: None,
             can_split: true,
-            should_display_tab_bar: Rc::new(|_| true),
+            should_display_tab_bar: Rc::new(|_, _| true),
             tab_bar_scroll_handle: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
 
-    pub fn set_can_split(&mut self, can_split: bool, cx: &mut ViewContext<Self>) {
+    pub fn set_can_split(&mut self, can_split: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.can_split = can_split;
         cx.notify();
     }
 
     pub fn set_should_display_tab_bar<F>(&mut self, f: F)
     where
-        F: 'static + Fn(&ViewContext<Pane>) -> bool,
+        F: 'static + Fn(&Window, &Context<Pane>) -> bool,
     {
         self.should_display_tab_bar = Rc::new(f);
     }
 
-    pub fn set_custom_drop_handle<F>(&mut self, cx: &mut ViewContext<Self>, handle: F)
-    where
-        F: 'static + Fn(&mut Pane, &dyn Any, &mut ViewContext<Pane>) -> ControlFlow<(), ()>,
+    pub fn set_custom_drop_handle<F>(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+        handle: F,
+    ) where
+        F: 'static
+            + Fn(&mut Pane, &dyn Any, &mut Window, &mut Context<Pane>) -> ControlFlow<(), ()>,
     {
         self.custom_drop_handle = Some(Arc::new(handle));
         cx.notify();
@@ -198,14 +209,16 @@ impl Pane {
     pub fn close_item_by_id(
         &mut self,
         item_id_to_close: EntityId,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        self.close_items(cx, move |view_id| view_id == item_id_to_close)
+        self.close_items(window, cx, move |view_id| view_id == item_id_to_close)
     }
 
     pub fn close_items(
         &mut self,
-        cx: &mut ViewContext<Pane>,
+        window: &mut Window,
+        cx: &mut Context<Pane>,
         should_close: impl Fn(EntityId) -> bool,
     ) -> Task<Result<()>> {
         let mut items_to_close = Vec::new();
@@ -217,16 +230,16 @@ impl Pane {
         }
 
         // let workspace = self.workspace.clone();
-        cx.spawn(|pane, mut cx| async move {
+        cx.spawn_in(window, |pane, mut cx| async move {
             for item in items_to_close {
                 // Remove the item from the pane.
-                pane.update(&mut cx, |pane, cx| {
+                pane.update_in(&mut cx, |pane, window, cx| {
                     if let Some(item_ix) = pane
                         .items
                         .iter()
                         .position(|i| i.item_id() == item.item_id())
                     {
-                        pane.remove_item(item_ix, false, cx);
+                        pane.remove_item(item_ix, false, window, cx);
                     }
                 })
                 .ok();
@@ -241,7 +254,8 @@ impl Pane {
         &mut self,
         item_index: usize,
         activate_pane: bool,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         let close_pane_if_empty = true;
         // self.activation_history
@@ -250,11 +264,17 @@ impl Pane {
         if item_index == self.active_item_index {
             let index_to_activate = item_index.min(self.items.len()).saturating_sub(1);
 
-            let should_activate = activate_pane || self.has_focus(cx);
+            let should_activate = activate_pane || self.has_focus(window, cx);
             if self.items.len() == 1 && should_activate {
-                self.focus_handle.focus(cx);
+                self.focus_handle.focus(window);
             } else {
-                self.activate_item(index_to_activate, should_activate, should_activate, cx);
+                self.activate_item(
+                    index_to_activate,
+                    should_activate,
+                    should_activate,
+                    window,
+                    cx,
+                );
             }
         }
 
@@ -263,7 +283,7 @@ impl Pane {
             item_id: item.item_id(),
         });
         if self.items.is_empty() {
-            item.deactivated(cx);
+            item.deactivated(window, cx);
             if close_pane_if_empty {
                 cx.emit(Event::Remove);
             }
@@ -291,7 +311,8 @@ impl Pane {
         activate_pane: bool,
         focus_item: bool,
         destination_index: Option<usize>,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         // If no destination index is specified, add or move the item after the active item.
         let mut insertion_index = {
@@ -339,7 +360,7 @@ impl Pane {
                 cx.notify();
             }
 
-            self.activate_item(insertion_index, activate_pane, focus_item, cx);
+            self.activate_item(insertion_index, activate_pane, focus_item, window, cx);
         } else {
             self.items.insert(insertion_index, item.clone());
 
@@ -347,7 +368,7 @@ impl Pane {
                 self.active_item_index += 1;
             }
 
-            self.activate_item(insertion_index, activate_pane, focus_item, cx);
+            self.activate_item(insertion_index, activate_pane, focus_item, window, cx);
             cx.notify();
         }
 
@@ -366,7 +387,7 @@ impl Pane {
         self.items.get(self.active_item_index).cloned()
     }
 
-    pub fn pixel_position_of_cursor(&self, cx: &AppContext) -> Option<Point<Pixels>> {
+    pub fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>> {
         self.items
             .get(self.active_item_index)?
             .pixel_position_of_cursor(cx)
@@ -377,13 +398,14 @@ impl Pane {
         index: usize,
         activate_pane: bool,
         focus_item: bool,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         if index < self.items.len() {
             let prev_active_item_ix = mem::replace(&mut self.active_item_index, index);
             if prev_active_item_ix != self.active_item_index {
                 if let Some(prev_item) = self.items.get(prev_active_item_ix) {
-                    prev_item.deactivated(cx);
+                    prev_item.deactivated(window, cx);
                 }
             }
 
@@ -392,7 +414,7 @@ impl Pane {
             });
 
             if focus_item {
-                self.focus_active_item(cx);
+                self.focus_active_item(window, cx);
             }
 
             self.tab_bar_scroll_handle.scroll_to_item(index);
@@ -400,30 +422,41 @@ impl Pane {
         }
     }
 
-    pub fn activate_prev_item(&mut self, activate_pane: bool, cx: &mut ViewContext<Self>) {
+    pub fn activate_prev_item(
+        &mut self,
+        activate_pane: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut index = self.active_item_index;
         if index > 0 {
             index -= 1;
         } else if !self.items.is_empty() {
             index = self.items.len() - 1;
         }
-        self.activate_item(index, activate_pane, activate_pane, cx);
+        self.activate_item(index, activate_pane, activate_pane, window, cx);
     }
 
-    pub fn activate_next_item(&mut self, activate_pane: bool, cx: &mut ViewContext<Self>) {
+    pub fn activate_next_item(
+        &mut self,
+        activate_pane: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let mut index = self.active_item_index;
         if index + 1 < self.items.len() {
             index += 1;
         } else {
             index = 0;
         }
-        self.activate_item(index, activate_pane, activate_pane, cx);
+        self.activate_item(index, activate_pane, activate_pane, window, cx);
     }
 
     pub fn close_active_item(
         &mut self,
         _: &CloseActiveItem,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         if self.items.is_empty() {
             // cx.dispatch_action(Box::new(CloseWindow));
@@ -431,63 +464,68 @@ impl Pane {
         }
 
         let active_item_id = self.items[self.active_item_index].item_id();
-        Some(self.close_item_by_id(active_item_id, cx))
+        Some(self.close_item_by_id(active_item_id, window, cx))
     }
 
     pub fn close_inactive_items(
         &mut self,
         _: &CloseInactiveItems,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         if self.items.is_empty() {
             return None;
         }
 
         let active_item_id = self.items[self.active_item_index].item_id();
-        Some(self.close_items(cx, move |item_id| item_id != active_item_id))
+        Some(self.close_items(window, cx, move |item_id| item_id != active_item_id))
     }
 
     pub fn close_items_to_the_left(
         &mut self,
         _: &CloseItemsToTheLeft,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         if self.items.is_empty() {
             return None;
         }
         let active_item_id = self.items[self.active_item_index].item_id();
-        Some(self.close_items_to_the_left_by_id(active_item_id, cx))
+        Some(self.close_items_to_the_left_by_id(active_item_id, window, cx))
     }
 
     pub fn close_items_to_the_left_by_id(
         &mut self,
         item_id: EntityId,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let item_ids: Vec<_> = self
             .items()
             .take_while(|item| item.item_id() != item_id)
             .map(|item| item.item_id())
             .collect();
-        self.close_items(cx, move |item_id| item_ids.contains(&item_id))
+        self.close_items(window, cx, move |item_id| item_ids.contains(&item_id))
     }
 
     pub fn close_items_to_the_right(
         &mut self,
         _: &CloseItemsToTheRight,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         if self.items.is_empty() {
             return None;
         }
         let active_item_id = self.items[self.active_item_index].item_id();
-        Some(self.close_items_to_the_right_by_id(active_item_id, cx))
+        Some(self.close_items_to_the_right_by_id(active_item_id, window, cx))
     }
 
     pub fn close_items_to_the_right_by_id(
         &mut self,
         item_id: EntityId,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let item_ids: Vec<_> = self
             .items()
@@ -495,50 +533,62 @@ impl Pane {
             .take_while(|item| item.item_id() != item_id)
             .map(|item| item.item_id())
             .collect();
-        self.close_items(cx, move |item_id| item_ids.contains(&item_id))
+        self.close_items(window, cx, move |item_id| item_ids.contains(&item_id))
     }
 
     pub fn close_all_items(
         &mut self,
         _: &CloseAllItems,
-        cx: &mut ViewContext<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         if self.items.is_empty() {
             return None;
         }
 
-        Some(self.close_items(cx, |_| true))
+        Some(self.close_items(window, cx, |_| true))
     }
 
-    pub fn focus(&mut self, cx: &mut ViewContext<Pane>) {
-        cx.focus(&self.focus_handle);
+    pub fn focus(&mut self, window: &mut Window) {
+        window.focus(&self.focus_handle);
     }
 
-    pub fn focus_active_item(&mut self, cx: &mut ViewContext<Self>) {
+    pub fn focus_active_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(active_item) = self.active_item() {
-            let focus_handle = active_item.focus_handle(cx);
-            cx.focus(&focus_handle);
+            let focus_handle = active_item.item_focus_handle(window, cx);
+            window.focus(&focus_handle);
         }
     }
 
-    pub fn has_focus(&self, cx: &WindowContext) -> bool {
+    pub fn has_focus(&self, window: &Window, cx: &App) -> bool {
         // We not only check whether our focus handle contains focus, but also
         // whether the active_item might have focus, because we might have just activated an item
         // but that hasn't rendered yet.
         // So before the next render, we might have transferred focus
         // to the item and `focus_handle.contains_focus` returns false because the `active_item`
         // is not hooked up to us in the dispatch tree.
-        self.focus_handle.contains_focused(cx)
-            || self
-                .active_item()
-                .map_or(false, |item| item.focus_handle(cx).contains_focused(cx))
+        self.focus_handle.contains_focused(window, cx)
+            || self.active_item().map_or(false, |item| {
+                item.item_focus_handle(window, cx)
+                    .contains_focused(window, cx)
+            })
     }
 
-    pub fn split(&mut self, direction: SplitDirection, cx: &mut ViewContext<Self>) {
+    pub fn split(
+        &mut self,
+        direction: SplitDirection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.emit(Event::Split(direction));
     }
 
-    fn handle_drag_move<T>(&mut self, event: &DragMoveEvent<T>, _cx: &mut ViewContext<Self>) {
+    fn handle_drag_move<T>(
+        &mut self,
+        event: &DragMoveEvent<T>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
         if !self.can_split {
             return;
         }
@@ -582,31 +632,32 @@ impl Pane {
         &mut self,
         dragged_tab: &DraggedTab,
         ix: usize,
-        cx: &mut ViewContext<'_, Self>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
     ) {
         if let Some(custom_drop_handle) = self.custom_drop_handle.clone() {
-            if let ControlFlow::Break(()) = custom_drop_handle(self, dragged_tab, cx) {
+            if let ControlFlow::Break(()) = custom_drop_handle(self, dragged_tab, window, cx) {
                 return;
             }
         }
-        let mut to_pane = cx.view().clone();
+        let mut to_pane = cx.entity().clone();
         let split_direction = self.drag_split_direction;
         let item_id = dragged_tab.item.item_id();
 
         let from_pane = dragged_tab.pane.clone();
         self.workspace
             .update(cx, |_, cx| {
-                cx.defer(move |workspace, cx| {
+                cx.defer_in(window, move |workspace, window, cx| {
                     if let Some(split_direction) = split_direction {
-                        to_pane = workspace.split_pane(to_pane, split_direction, cx);
+                        to_pane = workspace.split_pane(to_pane, split_direction, window, cx);
                     }
-                    workspace.move_item(from_pane, to_pane, item_id, ix, cx);
+                    workspace.move_item(from_pane, to_pane, item_id, ix, window, cx);
                 });
             })
             .log_err();
     }
 
-    fn focus_in(&mut self, cx: &mut ViewContext<Self>) {
+    fn focus_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.was_focused {
             self.was_focused = true;
             cx.emit(Event::Focus);
@@ -614,37 +665,39 @@ impl Pane {
         }
 
         if let Some(active_item) = self.active_item() {
-            if self.focus_handle.is_focused(cx) {
+            if self.focus_handle.is_focused(window) {
                 // Pane was focused directly. We need to either focus a view inside the active item,
                 // or focus the active item itself
                 if let Some(weak_last_focus_handle) =
                     self.last_focus_handle_by_item.get(&active_item.item_id())
                 {
                     if let Some(focus_handle) = weak_last_focus_handle.upgrade() {
-                        focus_handle.focus(cx);
+                        focus_handle.focus(window);
                         return;
                     }
                 }
 
-                active_item.focus_handle(cx).focus(cx);
-            } else if let Some(focused) = cx.focused() {
+                active_item.item_focus_handle(window, cx).focus(window);
+            } else if let Some(focused) = window.focused(cx) {
                 self.last_focus_handle_by_item
                     .insert(active_item.item_id(), focused.downgrade());
             }
         }
     }
 
-    fn focus_out(&mut self, _event: FocusOutEvent, cx: &mut ViewContext<Self>) {
+    fn focus_out(&mut self, _event: FocusOutEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.was_focused = false;
         cx.notify();
     }
 
+    #[allow(clippy::borrowed_box)]
     fn render_tab(
         &self,
         ix: usize,
         item: &Box<dyn ItemHandle>,
         detail: usize,
-        cx: &mut ViewContext<'_, Pane>,
+        window: &mut Window,
+        cx: &mut Context<'_, Pane>,
     ) -> impl IntoElement {
         let is_active = ix == self.active_item_index;
 
@@ -653,6 +706,7 @@ impl Pane {
                 detail: Some(detail),
                 selected: is_active,
             },
+            window,
             cx,
         );
 
@@ -675,46 +729,53 @@ impl Pane {
                     .child(Icon::new(IconName::Close).size(px(12.)))
                     .hover(|this| this.bg(cx.theme().accent.darken(0.1)))
                     .active(|this| this.bg(cx.theme().accent.darken(0.2)))
-                    .on_click(cx.listener(move |pane, _, cx| {
-                        pane.close_item_by_id(item_id, cx).detach_and_log_err(cx);
+                    .on_click(cx.listener(move |pane, _, window, cx| {
+                        pane.close_item_by_id(item_id, window, cx)
+                            .detach_and_log_err(cx);
                     }))
                     .group_hover("tab", |this| this.visible())
                     .into_any(),
             )
             .selected(is_active)
-            .on_click(
-                cx.listener(move |pane: &mut Self, _, cx| pane.activate_item(ix, true, true, cx)),
-            )
+            .on_click(cx.listener(move |pane: &mut Self, _, window, cx| {
+                pane.activate_item(ix, true, true, window, cx)
+            }))
             .on_drag(
                 DraggedTab {
                     item: item.boxed_clone(),
-                    pane: cx.view().clone(),
+                    pane: cx.entity().clone(),
                     detail,
                     is_active,
                     ix,
                 },
-                |tab, cx| cx.new_view(|_| tab.clone()),
+                |tab, _, _, cx| cx.new(|_| tab.clone()),
             )
-            .drag_over::<DraggedTab>(|tab, _, cx| {
+            .drag_over::<DraggedTab>(|tab, _, _, cx| {
                 tab.rounded_l_none()
                     .border_l_2()
                     .border_r_0()
                     .border_color(cx.theme().drag_border)
             })
-            .drag_over::<DraggedSelection>(|tab, _, cx| tab.bg(cx.theme().drop_target))
+            .drag_over::<DraggedSelection>(|tab, _, _, cx| tab.bg(cx.theme().drop_target))
             .when_some(self.can_drop_predicate.clone(), |this, p| {
-                this.can_drop(move |a, cx| p(a, cx))
+                this.can_drop(move |a, window, cx| p(a, window, cx))
             })
-            .on_drop(cx.listener(move |this, dragged_tab: &DraggedTab, cx| {
-                this.drag_split_direction = None;
-                this.handle_tab_drop(dragged_tab, ix, cx)
-            }))
+            .on_drop(
+                cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                    this.drag_split_direction = None;
+                    this.handle_tab_drop(dragged_tab, ix, window, cx)
+                }),
+            )
             .when_some(item.tab_tooltip(cx), |tab, text| {
-                tab.tooltip(move |cx| Tooltip::new(text.clone(), cx))
+                tab.tooltip(move |window, cx| Tooltip::new(text.clone(), window, cx))
             })
     }
 
-    fn render_tab_bar(&mut self, cx: &mut ViewContext<'_, Pane>) -> impl IntoElement {
+    fn render_tab_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Pane>,
+    ) -> impl IntoElement {
         //     let navigate_backward = IconButton::new("navigate_backward", IconName::ArrowLeft)
         //     .shape(IconButtonShape::Square)
         //     .icon_size(IconSize::Small)
@@ -742,7 +803,7 @@ impl Pane {
                     .iter()
                     .enumerate()
                     .zip(tab_details(&self.items, cx))
-                    .map(|((ix, item), detail)| self.render_tab(ix, item, detail, cx)),
+                    .map(|((ix, item), detail)| self.render_tab(ix, item, detail, window, cx)),
             )
             .child(
                 div()
@@ -751,16 +812,18 @@ impl Pane {
                     .child("")
                     .h_full()
                     .flex_grow()
-                    .drag_over::<DraggedTab>(|bar, _, cx| bar.bg(cx.theme().drop_target))
-                    .drag_over::<DraggedSelection>(|bar, _, cx| bar.bg(cx.theme().drop_target))
-                    .on_drop(cx.listener(move |this, dragged_tab: &DraggedTab, cx| {
-                        this.drag_split_direction = None;
-                        this.handle_tab_drop(dragged_tab, this.items.len(), cx)
-                    })),
+                    .drag_over::<DraggedTab>(|bar, _, _, cx| bar.bg(cx.theme().drop_target))
+                    .drag_over::<DraggedSelection>(|bar, _, _, cx| bar.bg(cx.theme().drop_target))
+                    .on_drop(
+                        cx.listener(move |this, dragged_tab: &DraggedTab, window, cx| {
+                            this.drag_split_direction = None;
+                            this.handle_tab_drop(dragged_tab, this.items.len(), window, cx)
+                        }),
+                    ),
             )
     }
 
-    pub fn set_zoomed(&mut self, zoomed: bool, cx: &mut ViewContext<Self>) {
+    pub fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, cx: &mut Context<Self>) {
         self.zoomed = zoomed;
         cx.notify();
     }
@@ -774,7 +837,7 @@ impl Pane {
     }
 }
 
-pub fn tab_details(items: &Vec<Box<dyn ItemHandle>>, cx: &AppContext) -> Vec<usize> {
+pub fn tab_details(items: &Vec<Box<dyn ItemHandle>>, cx: &App) -> Vec<usize> {
     let mut tab_details = items.iter().map(|_| 0).collect::<Vec<_>>();
     let mut tab_descriptions = HashMap::new();
     let mut done = false;
@@ -810,14 +873,14 @@ pub fn tab_details(items: &Vec<Box<dyn ItemHandle>>, cx: &AppContext) -> Vec<usi
     tab_details
 }
 
-impl FocusableView for Pane {
-    fn focus_handle(&self, _cx: &AppContext) -> FocusHandle {
+impl Focusable for Pane {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
 impl Render for Pane {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::new_with_defaults();
         key_context.add("Pane");
         if self.active_item().is_none() {
@@ -825,7 +888,7 @@ impl Render for Pane {
         }
 
         let should_display_tab_bar = self.should_display_tab_bar.clone();
-        let display_tab_bar = should_display_tab_bar(cx);
+        let display_tab_bar = should_display_tab_bar(window, cx);
 
         v_flex()
             .key_context(key_context)
@@ -833,69 +896,85 @@ impl Render for Pane {
             .size_full()
             .flex_none()
             .overflow_hidden()
-            .on_action(cx.listener(|pane, _: &SplitLeft, cx| pane.split(SplitDirection::Left, cx)))
-            .on_action(cx.listener(|pane, _: &SplitUp, cx| pane.split(SplitDirection::Up, cx)))
-            .on_action(
-                cx.listener(|pane, _: &SplitRight, cx| pane.split(SplitDirection::Right, cx)),
-            )
-            .on_action(cx.listener(|pane, _: &SplitDown, cx| pane.split(SplitDirection::Down, cx)))
-            // .on_action(cx.listener(|pane, _: &GoBack, cx| pane.navigate_backward(cx)))
-            // .on_action(cx.listener(|pane, _: &GoForward, cx| pane.navigate_forward(cx)))
+            .on_action(cx.listener(|pane, _: &SplitLeft, window, cx| {
+                pane.split(SplitDirection::Left, window, cx)
+            }))
+            .on_action(cx.listener(|pane, _: &SplitUp, window, cx| {
+                pane.split(SplitDirection::Up, window, cx)
+            }))
+            .on_action(cx.listener(|pane, _: &SplitRight, window, cx| {
+                pane.split(SplitDirection::Right, window, cx)
+            }))
+            .on_action(cx.listener(|pane, _: &SplitDown, window, cx| {
+                pane.split(SplitDirection::Down, window, cx)
+            }))
+            // .on_action(cx.listener(|pane, _: &GoBack, window, cx| pane.navigate_backward(window, cx)))
+            // .on_action(cx.listener(|pane, _: &GoForward, window, cx| pane.navigate_forward(window, cx)))
             // .on_action(cx.listener(Pane::toggle_zoom))
-            .on_action(cx.listener(|pane: &mut Pane, action: &ActivateItem, cx| {
-                pane.activate_item(action.0, true, true, cx);
-            }))
-            .on_action(cx.listener(|pane: &mut Pane, _: &ActivateLastItem, cx| {
-                pane.activate_item(pane.items.len() - 1, true, true, cx);
-            }))
-            .on_action(cx.listener(|pane: &mut Pane, _: &ActivatePrevItem, cx| {
-                pane.activate_prev_item(true, cx);
-            }))
-            .on_action(cx.listener(|pane: &mut Pane, _: &ActivateNextItem, cx| {
-                pane.activate_next_item(true, cx);
-            }))
             .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseActiveItem, cx| {
-                    if let Some(task) = pane.close_active_item(action, cx) {
+                cx.listener(|pane: &mut Pane, action: &ActivateItem, window, cx| {
+                    pane.activate_item(action.0, true, true, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|pane: &mut Pane, _: &ActivateLastItem, window, cx| {
+                    pane.activate_item(pane.items.len() - 1, true, true, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|pane: &mut Pane, _: &ActivatePrevItem, window, cx| {
+                    pane.activate_prev_item(true, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|pane: &mut Pane, _: &ActivateNextItem, window, cx| {
+                    pane.activate_next_item(true, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|pane: &mut Self, action: &CloseActiveItem, window, cx| {
+                    if let Some(task) = pane.close_active_item(action, window, cx) {
                         task.detach_and_log_err(cx)
                     }
                 }),
             )
             .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseInactiveItems, cx| {
-                    if let Some(task) = pane.close_inactive_items(action, cx) {
+                cx.listener(|pane: &mut Self, action: &CloseInactiveItems, window, cx| {
+                    if let Some(task) = pane.close_inactive_items(action, window, cx) {
+                        task.detach_and_log_err(cx)
+                    }
+                }),
+            )
+            .on_action(cx.listener(
+                |pane: &mut Self, action: &CloseItemsToTheLeft, window, cx| {
+                    if let Some(task) = pane.close_items_to_the_left(action, window, cx) {
+                        task.detach_and_log_err(cx)
+                    }
+                },
+            ))
+            .on_action(cx.listener(
+                |pane: &mut Self, action: &CloseItemsToTheRight, window, cx| {
+                    if let Some(task) = pane.close_items_to_the_right(action, window, cx) {
+                        task.detach_and_log_err(cx)
+                    }
+                },
+            ))
+            .on_action(
+                cx.listener(|pane: &mut Self, action: &CloseAllItems, window, cx| {
+                    if let Some(task) = pane.close_all_items(action, window, cx) {
                         task.detach_and_log_err(cx)
                     }
                 }),
             )
             .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseItemsToTheLeft, cx| {
-                    if let Some(task) = pane.close_items_to_the_left(action, cx) {
-                        task.detach_and_log_err(cx)
-                    }
-                }),
-            )
-            .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseItemsToTheRight, cx| {
-                    if let Some(task) = pane.close_items_to_the_right(action, cx) {
-                        task.detach_and_log_err(cx)
-                    }
-                }),
-            )
-            .on_action(cx.listener(|pane: &mut Self, action: &CloseAllItems, cx| {
-                if let Some(task) = pane.close_all_items(action, cx) {
-                    task.detach_and_log_err(cx)
-                }
-            }))
-            .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseActiveItem, cx| {
-                    if let Some(task) = pane.close_active_item(action, cx) {
+                cx.listener(|pane: &mut Self, action: &CloseActiveItem, window, cx| {
+                    if let Some(task) = pane.close_active_item(action, window, cx) {
                         task.detach_and_log_err(cx)
                     }
                 }),
             )
             .when(self.active_item().is_some() && display_tab_bar, |pane| {
-                pane.child(self.render_tab_bar(cx))
+                pane.child(self.render_tab_bar(window, cx))
             })
             .child({
                 // main content
@@ -929,10 +1008,15 @@ impl Render for Pane {
                             .group_drag_over::<DraggedTab>("", |style| style.visible())
                             .group_drag_over::<DraggedSelection>("", |style| style.visible())
                             .when_some(self.can_drop_predicate.clone(), |this, p| {
-                                this.can_drop(move |a, cx| p(a, cx))
+                                this.can_drop(move |a, window, cx| p(a, window, cx))
                             })
-                            .on_drop(cx.listener(move |this, dragged_tab, cx| {
-                                this.handle_tab_drop(dragged_tab, this.active_item_index(), cx)
+                            .on_drop(cx.listener(move |this, dragged_tab, window, cx| {
+                                this.handle_tab_drop(
+                                    dragged_tab,
+                                    this.active_item_index(),
+                                    window,
+                                    cx,
+                                )
                             }))
                             .map(|div| {
                                 let size = DefiniteLength::Fraction(0.5);

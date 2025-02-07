@@ -4,12 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-gpui = { git = "https://github.com/huacnlee/zed.git", branch = "export-platform-window" }
+gpui = { git = "https://github.com/huacnlee/zed.git", branch = "webview" }
 ui = { git = "https://github.com/longbridgeapp/gpui-component.git" }
 anyhow = "1"
 log = "0.4"
 schemars = "0"
 parking_lot = "0"
 serde = "1.0.203"
-serde_json = "1"
 smallvec = "1"
