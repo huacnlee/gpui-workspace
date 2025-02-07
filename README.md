@@ -6,7 +6,7 @@ https://github.com/zed-industries/zed/tree/main/crates/workspace
 
 ## More UI component?
 
-https://github.com/longbridgeapp/gpui-component
+https://github.com/longbridge/gpui-component
 
 ## License
 
